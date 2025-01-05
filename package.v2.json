@@ -510,11 +510,12 @@
     "name": "短剧刮削",
     "description": "监控视频短剧创建，刮削。",
     "labels": "刮削",
-    "version": "4.1",
+    "version": "4.2",
     "icon": "Amule_B.png",
     "author": "thsrite",
     "level": 1,
     "history": {
+      "v4.2": "修复title",
       "v4.1": "修复重命名问题以及支持同步转移nfo等文件",
       "v4.0": "支持MoviePilot V2 版本",
       "v3.2": "支持消息发送",
