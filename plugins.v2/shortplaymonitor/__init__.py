@@ -280,6 +280,25 @@ class ShortPlayMonitor(_PluginBase):
                            event_path=event_path,
                            source_dir=source_dir)
 
+    def __transfer_related_files(self, source_dir: Path, target_dir: Path):
+        """
+        转移相关文件（nfo、图片等）
+        """
+        related_extensions = [".nfo", ".jpg", ".png"]
+
+        # 获取源目录下的所有相关文件
+        for ext in related_extensions:
+            source_files = list(source_dir.glob(f"*{ext}"))
+            for source_file in source_files:
+                target_file = target_dir / source_file.name
+                if not target_file.exists():
+                    self.__transfer_command(
+                        file_item=source_file,
+                        target_file=target_file,
+                        transfer_type=self._transfer_type
+                    )
+                    logger.info(f"相关文件 {source_file.name} 已转移")
+
     def __handle_file(self, is_directory: bool, event_path: str, source_dir: str):
         """
         同步一个文件
@@ -421,6 +440,11 @@ class ShortPlayMonitor(_PluginBase):
                                                       transfer_type=self._transfer_type)
                     if retcode == 0:
                         logger.info(f"文件 {event_path} 硬链接完成")
+
+                        self.__transfer_related_files(
+                            source_dir=Path(event_path).parent,
+                            target_dir=Path(target_path).parent
+                        )
                         # 生成 tvshow.nfo
                         if not (target_path.parent / "tvshow.nfo").exists():
                             self.__gen_tv_nfo_file(dir_path=target_path.parent,
