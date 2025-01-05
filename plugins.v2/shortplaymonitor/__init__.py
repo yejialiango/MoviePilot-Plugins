@@ -63,7 +63,7 @@ class ShortPlayMonitor(_PluginBase):
     # 插件图标
     plugin_icon = "Amule_B.png"
     # 插件版本
-    plugin_version = "4.2"
+    plugin_version = "4.3"
     # 插件作者
     plugin_author = "thsrite"
     # 作者主页
@@ -413,17 +413,17 @@ class ShortPlayMonitor(_PluginBase):
                         logger.info(f"创建目标文件夹 {target_path}")
                         os.makedirs(target_path)
                 else:
-                    # 媒体重命名
-                    try:
-                        pattern = r'S\d+E\d+'
-                        matches = re.search(pattern, Path(target_path).name)
-                        if matches:
-                            target_path = Path(
-                                target_path).parent / f"{matches.group()}{Path(Path(target_path).name).suffix}"
-                        else:
-                            print("未找到匹配的季数和集数")
-                    except Exception as e:
-                        print(e)
+                    # # 媒体重命名
+                    # try:
+                    #     pattern = r'S\d+E\d+'
+                    #     matches = re.search(pattern, Path(target_path).name)
+                    #     if matches:
+                    #         target_path = Path(
+                    #             target_path).parent / f"{matches.group()}{Path(Path(target_path).name).suffix}"
+                    #     else:
+                    #         print("未找到匹配的季数和集数")
+                    # except Exception as e:
+                    #     print(e)
 
                     # 目标文件夹不存在则创建
                     if not Path(target_path).parent.exists():

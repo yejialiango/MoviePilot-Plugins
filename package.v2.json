@@ -515,6 +515,7 @@
     "author": "thsrite",
     "level": 1,
     "history": {
+      "v4.3": "取消重命名",
       "v4.2": "修复title",
       "v4.1": "修复重命名问题以及支持同步转移nfo等文件",
       "v4.0": "支持MoviePilot V2 版本",
