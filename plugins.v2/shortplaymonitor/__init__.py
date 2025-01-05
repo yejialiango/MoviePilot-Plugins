@@ -398,7 +398,8 @@ class ShortPlayMonitor(_PluginBase):
                             # 对第一级目录应用智能重命名（通常是剧集名称）
                             series_name = path_parts[0].split(".")[0]
                             path_parts[0] = series_name
-
+                            # 更新title
+                            title = series_name
                             # 重新组合路径
                             target_path = Path(dest_dir).joinpath(*path_parts)
                     else:
