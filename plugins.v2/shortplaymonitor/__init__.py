@@ -57,7 +57,7 @@ class FileMonitorHandler(FileSystemEventHandler):
 
 class ShortPlayMonitor(_PluginBase):
     # 插件名称
-    plugin_name = "短剧刮削"
+    plugin_name = "短剧刮削-fixed"
     # 插件描述
     plugin_desc = "监控视频短剧创建，刮削。"
     # 插件图标
@@ -370,12 +370,18 @@ class ShortPlayMonitor(_PluginBase):
                         title = parent
                 else:
                     if str(rename_conf) == "smart":
-                        target = target_path.replace(dest_dir, "")
-                        parent = Path(Path(target).parents[0])
-                        last = target.replace(str(parent), "")
-                        # 取.第一个
-                        title = Path(parent).name.split(".")[0]
-                        target_path = Path(dest_dir).joinpath(title + last)
+                        # 获取相对路径
+                        relative_path = Path(event_path).relative_to(Path(source_dir))
+                        # 分解路径获取所有层级
+                        path_parts = list(relative_path.parts)
+
+                        if len(path_parts) > 0:
+                            # 对第一级目录应用智能重命名（通常是剧集名称）
+                            series_name = path_parts[0].split(".")[0]
+                            path_parts[0] = series_name
+
+                            # 重新组合路径
+                            target_path = Path(dest_dir).joinpath(*path_parts)
                     else:
                         logger.error(f"{target_path} 智能重命名失败")
                         return
