@@ -523,5 +523,19 @@
       "v3.1": "支持自定义转移方式",
       "v3.0": "默认从tmdb刮削，刮削失败则从pt站刮削"
     }
+  },
+  "PlayletCategory": {
+    "name": "短剧自动分类",
+    "description": "网络短剧自动整理到独立的分类目录。",
+    "labels": "文件整理",
+    "version": "2.2",
+    "icon": "Amule_A.png",
+    "author": "jxxghp,longqiuyu",
+    "level": 1,
+    "history": {
+      "v2.2": "FFmpeg处理出错允许重试",
+      "v2.1": "兼容MoviePilot V2",
+      "v2.0": "适配新的目录结构变化，短剧分类名称调整为配置目录路径，升级后需要重新调整设置后才能使用。"
+    }
   }
 }
