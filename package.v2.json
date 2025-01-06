@@ -510,11 +510,12 @@
     "name": "短剧刮削",
     "description": "监控视频短剧创建，刮削。",
     "labels": "刮削",
-    "version": "4.2",
+    "version": "4.4",
     "icon": "Amule_B.png",
     "author": "thsrite",
     "level": 1,
     "history": {
+      "v4.4": "搜索取消括号",
       "v4.3": "取消重命名",
       "v4.2": "修复title",
       "v4.1": "修复重命名问题以及支持同步转移nfo等文件",

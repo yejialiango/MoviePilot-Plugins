@@ -63,7 +63,7 @@ class ShortPlayMonitor(_PluginBase):
     # 插件图标
     plugin_icon = "Amule_B.png"
     # 插件版本
-    plugin_version = "4.3"
+    plugin_version = "4.4"
     # 插件作者
     plugin_author = "thsrite"
     # 作者主页
@@ -634,27 +634,27 @@ class ShortPlayMonitor(_PluginBase):
         从agsv或者萝莉站查询封面
         """
         try:
+            search_title = re.sub(r'\s*\([^)]*\)', '', title).strip()
             image = None
             # 查询索引
             domain = "agsvpt.com"
             site = SiteOper().get_by_domain(domain)
             index = SitesHelper().get_indexer(domain)
             if site:
-                req_url = f"https://www.agsvpt.com/torrents.php?search_mode=0&search_area=0&page=0&notnewword=1&cat=419&search={title}"
+                req_url = f"https://www.agsvpt.com/torrents.php?search_mode=0&search_area=0&page=0&notnewword=1&cat=419&search={search_title}"
                 image_xpath = "//*[@id='kdescr']/img[1]/@src"
                 # 查询站点资源
-                logger.info(f"开始检索 {site.name} {title}")
+                logger.info(f"开始检索 {site.name} {search_title}")
                 image = self.__get_site_torrents(url=req_url, site=site, image_xpath=image_xpath, index=index)
             if not image:
                 domain = "ilolicon.com"
                 site = SiteOper().get_by_domain(domain)
                 index = SitesHelper().get_indexer(domain)
                 if site:
-                    req_url = f"https://share.ilolicon.com/torrents.php?search_mode=0&search_area=0&page=0&notnewword=1&cat=402&search={title}"
-
+                    req_url = f"https://share.ilolicon.com/torrents.php?search_mode=0&search_area=0&page=0&notnewword=1&cat=402&search={search_title}"
                     image_xpath = "//*[@id='kdescr']/img[1]/@src"
                     # 查询站点资源
-                    logger.info(f"开始检索 {site.name} {title}")
+                    logger.info(f"开始检索 {site.name} {search_title}")
                     image = self.__get_site_torrents(url=req_url, site=site, image_xpath=image_xpath, index=index)
 
             if not image:
