@@ -41,7 +41,7 @@ MoviePilot 的整理顺序是：
 |---|---|---|
 | 1 | `cancel` 之后宿主记成「失败」还是「待重试」，会不会推送通知 | 每部片子刷一条整理失败太吵，需要知道要不要做静默 |
 | 2 | 同一文件两次进入拦截时，指纹是否稳定 | 指纹是防重入的基础；不稳定会导致无限循环重跑 |
-| 3 | `meta` 实际是不是 `None` | `__intercept_transfer` 在 `over_flag is None` 的分支里不传 `meta`，重投时需要知道能不能省略 |
+| 3 | ~~`meta` 实际是不是 `None`~~ | **已实测**：`options={'over_flag': False}`，走带 `meta` 的分支，拿到 `MetaVideo`，重投可原样带回 |
 
 ## 用法
 
@@ -51,6 +51,22 @@ MoviePilot 的整理顺序是：
 3. 再打开「演练后自动重投」，可验证 `do_transfer` 重投是否闭环。
 
 记录表字段：源/目标分别标注「本地」还是「网盘」，用于确认拦截时刻拿到的确实是本地路径。
+拦截与结算两类记录都带指纹，可直接对账同一个文件的完整生命周期。
+
+## 首轮实测结论（v0.1.x）
+
+```
+拦截  源=本地 /CloudNAS/downloads/v2/...  storage=local  1.85 GB
+      目标=网盘 /CloudNAS/115/media/movies/...
+      方式=move  meta=MetaVideo  options={'over_flag': False}
+      媒体=今晚正好 (2026) [电影] tmdb=1488778
+完成  success=True files=1
+```
+
+* 拦截时刻源文件确实还在本地盘，方案地基成立；
+* 媒体身份齐全，目标路径（含重命名结果）已算好；
+* `mediainfo.original_language` 为空，后续「中文片跳过」不能依赖该字段，
+  需改用 `meta` 的语言线索或 ffprobe 读音轨。
 
 ## 安全性
 

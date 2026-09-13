@@ -11,7 +11,8 @@
 探针要回答的三个问题（详见 README）：
 1. cancel 之后宿主把它记成失败还是待重试，会不会推送通知；
 2. 同一个文件两次进入拦截时，指纹是否稳定（防重入的基础）；
-3. meta 字段在 over_flag 为 None 的分支里不会被赋值，实际拿到的是不是 None。
+3. meta 实际是否为 None —— 已实测：options 为 {'over_flag': False}，走的是带 meta 的分支，
+   拿到的是 MetaVideo，重投时可以原样带回，不必让宿主重新解析文件名。
 """
 
 from __future__ import annotations
@@ -39,7 +40,7 @@ class PreTransferSub(_PluginBase):
     plugin_name = "整理前字幕"
     plugin_desc = "整理搬运前趁文件还在本地生成字幕，随视频一并入库。当前版本为观测探针。"
     plugin_icon = "https://raw.githubusercontent.com/yejialiango/MoviePilot-Plugins/main/icons/pretransfersub.png"
-    plugin_version = "0.1.1"
+    plugin_version = "0.1.2"
     plugin_author = "yejialiango"
     author_url = "https://github.com/yejialiango"
     plugin_config_prefix = "pretransfersub_"
@@ -190,14 +191,20 @@ class PreTransferSub(_PluginBase):
             mediainfo = item.get("mediainfo") if isinstance(item, dict) else None
             file_list_new = getattr(transferinfo, "file_list_new", None) or []
             first = file_list_new[0] if file_list_new else ""
+            # 结算记录也算一次指纹，才能和拦截记录对账；拿不到源 fileitem 时退回占位符。
+            src_fileitem = getattr(transferinfo, "fileitem", None)
+            src_path = str(getattr(src_fileitem, "path", "") or "")
+            key = self.__fingerprint(src_fileitem) if src_fileitem else ""
+            with self._lock:
+                seq = (self._seen.get(key) or {}).get("count", "-") if key else "-"
             self.__add_record({
                 "ts": datetime.now().strftime("%m-%d %H:%M:%S"),
                 "stage": stage,
-                "key": "-",
-                "seq": "-",
-                "name": getattr(getattr(transferinfo, "fileitem", None), "name", ""),
-                "src": str(getattr(getattr(transferinfo, "fileitem", None), "path", "") or ""),
-                "src_side": "-",
+                "key": key[:10] if key else "-",
+                "seq": seq,
+                "name": getattr(src_fileitem, "name", ""),
+                "src": src_path,
+                "src_side": self.__which_side(src_path),
                 "media": self.__media_brief(mediainfo),
                 "target_path": first,
                 "target_side": self.__which_side(first),
