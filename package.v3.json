@@ -596,5 +596,19 @@
     "history": {
       "v2.0.0": "严格适配 V3 整理历史与硬链接恢复安全合同。"
     }
+  },
+  "PreTransferSub": {
+    "name": "整理前字幕",
+    "description": "整理搬运前趁文件还在本地生成字幕，随视频一并入库。当前版本为观测探针。",
+    "labels": "字幕",
+    "version": "0.1.0",
+    "icon": "pretransfersub.png",
+    "author": "yejialiango",
+    "level": 1,
+    "release": true,
+    "system_version": ">=3.0.0",
+    "history": {
+      "v0.1.0": "探针版：观测 TransferIntercept 上下文，可选拦截演练与 do_transfer 重投验证。"
+    }
   }
 }
