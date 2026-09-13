@@ -39,7 +39,7 @@ class PreTransferSub(_PluginBase):
     plugin_name = "整理前字幕"
     plugin_desc = "整理搬运前趁文件还在本地生成字幕，随视频一并入库。当前版本为观测探针。"
     plugin_icon = "https://raw.githubusercontent.com/yejialiango/MoviePilot-Plugins/main/icons/pretransfersub.png"
-    plugin_version = "0.1.0"
+    plugin_version = "0.1.1"
     plugin_author = "yejialiango"
     author_url = "https://github.com/yejialiango"
     plugin_config_prefix = "pretransfersub_"

@@ -601,14 +601,15 @@
     "name": "整理前字幕",
     "description": "整理搬运前趁文件还在本地生成字幕，随视频一并入库。当前版本为观测探针。",
     "labels": "字幕",
-    "version": "0.1.0",
-    "icon": "pretransfersub.png",
+    "version": "0.1.1",
+    "icon": "https://raw.githubusercontent.com/yejialiango/MoviePilot-Plugins/main/icons/pretransfersub.png",
     "author": "yejialiango",
     "level": 1,
     "release": true,
     "system_version": ">=3.0.0",
     "history": {
-      "v0.1.0": "探针版：观测 TransferIntercept 上下文，可选拦截演练与 do_transfer 重投验证。"
+      "v0.1.0": "探针版：观测 TransferIntercept 上下文，可选拦截演练与 do_transfer 重投验证。",
+      "v0.1.1": "修正市场索引 icon 为完整 raw URL（相对文件名会被解析到宿主自带的 /public/plugin_icon）。"
     }
   }
 }
