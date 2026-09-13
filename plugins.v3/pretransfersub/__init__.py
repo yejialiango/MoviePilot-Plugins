@@ -40,7 +40,7 @@ class PreTransferSub(_PluginBase):
     plugin_name = "整理前字幕"
     plugin_desc = "整理搬运前趁文件还在本地生成字幕，随视频一并入库。当前版本为观测探针。"
     plugin_icon = "https://raw.githubusercontent.com/yejialiango/MoviePilot-Plugins/main/icons/pretransfersub.png"
-    plugin_version = "0.1.3"
+    plugin_version = "0.1.4"
     plugin_author = "yejialiango"
     author_url = "https://github.com/yejialiango"
     plugin_config_prefix = "pretransfersub_"
@@ -49,8 +49,9 @@ class PreTransferSub(_PluginBase):
 
     # 观测记录上限，避免 plugindata 无限膨胀。
     MAX_RECORDS = 200
-    # 演练重投前的等待秒数，给宿主结算留出时间，避免与本次取消的收尾抢同一条历史。
-    REDO_DELAY = 5
+    # 演练重投前的等待秒数。实测取消发生在 T+0、失败结算在 T+31s 才完成，期间旧任务
+    # 仍占着队列准入记录与租约，过早重投会被 admission 以「已按不同输入准入」挡下。
+    REDO_DELAY = 60
 
     def __init__(self) -> None:
         super().__init__()
@@ -236,10 +237,15 @@ class PreTransferSub(_PluginBase):
                 # （execution.py 的 DirectoryHelper().get_dir(dest_path=...)），
                 # 原样回传会匹配不到任何配置目录。宿主自己的 monitor/dispatcher
                 # 也只传 fileitem，不传目标。
+                # manual=True 是必须的：execution.py 里 replace_inactive=bool(task.manual)，
+                # 只有手动整理才允许放弃同一源文件的旧准入记录。插件重投本质就是一次
+                # 显式重做，不带这个标志会被 _assert_input_match 判为
+                # 「整理源文件已按不同输入准入」而直接拒绝。
                 state, msg = TransferChain().do_transfer(
                     fileitem=fileitem,
                     meta=meta,
                     mediainfo=mediainfo,
+                    manual=True,
                     background=True,
                 )
                 logger.info(f"【{self.plugin_name}】重投结果 state={state} msg={msg}")
