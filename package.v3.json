@@ -601,7 +601,7 @@
     "name": "整理前字幕",
     "description": "整理搬运前趁文件还在本地生成字幕，随视频一并入库。当前版本为观测探针。",
     "labels": "字幕",
-    "version": "0.1.2",
+    "version": "0.1.3",
     "icon": "https://raw.githubusercontent.com/yejialiango/MoviePilot-Plugins/main/icons/pretransfersub.png",
     "author": "yejialiango",
     "level": 1,
@@ -610,7 +610,8 @@
     "history": {
       "v0.1.0": "探针版：观测 TransferIntercept 上下文，可选拦截演练与 do_transfer 重投验证。",
       "v0.1.1": "修正市场索引 icon 为完整 raw URL（相对文件名会被解析到宿主自带的 /public/plugin_icon）。",
-      "v0.1.2": "结算记录补上指纹与源位置标注，可与拦截记录对账。"
+      "v0.1.2": "结算记录补上指纹与源位置标注，可与拦截记录对账。",
+      "v0.1.3": "重投不再回传 target_path/target_storage：拦截事件给的是目标文件路径，而 do_transfer 把它当目标目录匹配，会规划失败。"
     }
   }
 }
