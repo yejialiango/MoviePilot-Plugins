@@ -186,10 +186,13 @@ class LoginSession(threading.Thread):
         "need_verifycode": ("请在插件配置的「配对数字」里填写手机上显示的数字并保存", "warn"),
     }
 
-    def __init__(self, plugin: "ClawBotBridge", relogin_id: Optional[str] = None) -> None:
+    def __init__(self, plugin: "ClawBotBridge", relogin_id: Optional[str] = None,
+                 bind_user: Optional[str] = None) -> None:
         super().__init__(name="clawbotbridge-login", daemon=True)
         self.plugin = plugin
         self.relogin_id = relogin_id
+        # 预绑定：扫码确认时直接绑到这个 MoviePilot 用户，管理员不用再去配置页选。
+        self.bind_user = bind_user
         self.stop_event = threading.Event()
         self.started_at = _now()
         self.token = secrets.token_urlsafe(16)
@@ -255,7 +258,7 @@ class LoginSession(threading.Thread):
                     self._set(status, "该微信已被其他客户端绑定（例如内置 ClawBot 渠道），请先在那边退出登录", "err")
                     return
                 elif status == "confirmed":
-                    name = self.plugin.on_login_confirmed(self.relogin_id, data)
+                    name = self.plugin.on_login_confirmed(self.relogin_id, data, self.bind_user)
                     self._set(status, f"已连接：{name}", "ok")
                     return
         except Exception as err:
@@ -284,7 +287,7 @@ class ClawBotBridge(_PluginBase):
     plugin_name = "微信ClawBot多账号"
     plugin_desc = "多个微信号接入 MoviePilot 智能助手：扫码即绑定，按用户权限对话，回复分段陆续发出。"
     plugin_icon = "https://raw.githubusercontent.com/yejialiango/MoviePilot-Plugins/main/icons/Wechat_A.png"
-    plugin_version = "0.1.3"
+    plugin_version = "0.1.4"
     plugin_label = "消息通知"
     plugin_author = "yejialiango"
     author_url = "https://github.com/yejialiango"
@@ -389,7 +392,8 @@ class ClawBotBridge(_PluginBase):
                 peer["context_token"] = context_token
             self._persist()
 
-    def on_login_confirmed(self, relogin_id: Optional[str], data: Dict[str, Any]) -> str:
+    def on_login_confirmed(self, relogin_id: Optional[str], data: Dict[str, Any],
+                           bind_user: Optional[str] = None) -> str:
         owner = data.get("ilink_user_id") or ""
         fields = {
             "bot_token": data.get("bot_token"),
@@ -402,6 +406,8 @@ class ClawBotBridge(_PluginBase):
         }
         with self._lock:
             if relogin_id and relogin_id in self._accounts:
+                if bind_user:
+                    fields["mp_username"] = bind_user
                 self._accounts[relogin_id].update(fields)
                 acc_id = relogin_id
             else:
@@ -409,7 +415,7 @@ class ClawBotBridge(_PluginBase):
                 self._accounts[acc_id] = {
                     "id": acc_id,
                     "name": f"微信{len(self._accounts) + 1}",
-                    "mp_username": self._guess_mp_user(owner),
+                    "mp_username": bind_user or self._guess_mp_user(owner),
                     "switches": list(DEFAULT_SWITCHES),
                     "enabled": True,
                     "peers": {},
@@ -585,10 +591,14 @@ class ClawBotBridge(_PluginBase):
         # 页面按钮触发后宿主会重新拉取 get_page，这里无需做事。
         return _resp(True)
 
-    def api_login_start(self, account_id: str = "") -> Dict[str, Any]:
+    def api_login_start(self, account_id: str = "", mp_user: str = "") -> Dict[str, Any]:
+        if mp_user:
+            user = UserOper().get_by_name(mp_user)
+            if not user or not user.is_active:
+                return _resp(False, f"MoviePilot 用户 {mp_user} 不存在或已停用")
         if self._login and self._login.is_alive():
             self._login.stop_event.set()
-        self._login = LoginSession(self, relogin_id=account_id or None)
+        self._login = LoginSession(self, relogin_id=account_id or None, bind_user=mp_user or None)
         self._login.start()
         # 等二维码取回来，页面刷新时就能直接显示。
         for _ in range(20):
@@ -608,6 +618,8 @@ class ClawBotBridge(_PluginBase):
         if not login or (login.done and login.status != "confirmed"):
             return HTMLResponse(INVALID_HTML, status_code=404)
         title = "重新登录已有账号" if login.relogin_id else "新增一个微信账号"
+        if login.bind_user:
+            title += f"，将绑定为 {login.bind_user}"
         return HTMLResponse(render_share_page(title), headers={"Cache-Control": "no-store"})
 
     def api_share_status(self, t: str = "") -> JSONResponse:
@@ -709,6 +721,8 @@ class ClawBotBridge(_PluginBase):
             title = f"重新扫码：{acc.get('name') or login.relogin_id}"
         else:
             title = "扫码添加微信"
+        if login.bind_user:
+            title += f" · 将绑定为 {login.bind_user}"
         if login.status == "confirmed":
             visual = {"component": "div", "props": {"class": "text-h2 text-center py-6"}, "text": "✅"}
         elif login.qr_image and not login.done:
@@ -792,4 +806,18 @@ class ClawBotBridge(_PluginBase):
             self._btn("添加微信", "login/start", color="primary", **{"prepend-icon": "mdi-qrcode"}),
             self._btn("刷新", "refresh", variant="tonal"),
         ]})
+        bound: Dict[str, int] = {}
+        for acc in accounts:
+            if acc.get("mp_username"):
+                bound[acc["mp_username"]] = bound.get(acc["mp_username"], 0) + 1
+        users = [u for u in (UserOper().list() or []) if u.is_active]
+        if users:
+            page.append({"component": "div", "props": {"class": "text-body-2 text-medium-emphasis mt-3 mb-1"},
+                         "text": "为指定用户添加（扫码确认后自动绑定，不用再去配置里选）："})
+            page.append({"component": "div", "content": [
+                self._btn(u.name + (f" · 已接 {bound[u.name]}" if bound.get(u.name) else ""),
+                          "login/start", {"mp_user": u.name}, size="small", variant="outlined",
+                          **{"prepend-icon": "mdi-account-plus"})
+                for u in sorted(users, key=lambda x: (bound.get(x.name, 0) > 0, x.name))
+            ]})
         return page
