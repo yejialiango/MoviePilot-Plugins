@@ -18,7 +18,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
-import re
+import secrets
 import threading
 import time
 import uuid
@@ -26,14 +26,18 @@ from collections import deque
 from datetime import datetime
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
+from fastapi.responses import HTMLResponse, JSONResponse
+
 from app.db.oper.user import UserOper
 from app.plugins import _PluginBase
+from app.runtime.settings import get_runtime_setting
 from app.schemas.types import EventType, MessageType
 from app.sdk.events import Event, eventmanager
 from app.sdk.logging import logger
 
 from .ilink import STALE_TOKEN_ERRCODE, ILinkClient, ILinkError, InboundMessage
 from .segmenter import LineFilter, Segmenter, tidy
+from .share_page import INVALID_HTML, render_share_page
 
 # 默认推送的通知类型（MessageType 的中文值）。
 DEFAULT_SWITCHES = [MessageType.Download.value, MessageType.Organize.value,
@@ -43,8 +47,9 @@ SWITCH_ITEMS = [MessageType.Download, MessageType.Organize, MessageType.Subscrib
                 MessageType.Plugin, MessageType.Other]
 NEW_SESSION_COMMANDS = {"/new", "/新对话", "新对话"}
 STOP_COMMANDS = {"/stop", "/停止"}
-LOGIN_TTL = 300
-PARAMS_SUFFIX = re.compile(r"[，,]\s*主要参数[:：].*$", re.S)
+# 单张二维码约 4 分钟有效（服务端判定）；一次扫码窗口内过期自动换新。
+QR_TTL = 240
+LOGIN_WINDOW = 30 * 60
 TYPING_INTERVAL = 5.0
 
 
@@ -173,7 +178,13 @@ class AccountWorker(threading.Thread):
 
 
 class LoginSession(threading.Thread):
-    """一次扫码登录：取二维码并长轮询状态，确认后写入账号。"""
+    """一次扫码登录：取二维码并长轮询状态；二维码过期自动换新，直到确认、取消或超出扫码窗口。"""
+
+    STATUS_TEXT = {
+        "wait": ("请用要接入的微信扫码", ""),
+        "scaned": ("已扫码，请在手机上确认", "warn"),
+        "need_verifycode": ("请在插件配置的「配对数字」里填写手机上显示的数字并保存", "warn"),
+    }
 
     def __init__(self, plugin: "ClawBotBridge", relogin_id: Optional[str] = None) -> None:
         super().__init__(name="clawbotbridge-login", daemon=True)
@@ -181,53 +192,90 @@ class LoginSession(threading.Thread):
         self.relogin_id = relogin_id
         self.stop_event = threading.Event()
         self.started_at = _now()
+        self.token = secrets.token_urlsafe(16)
         self.status = "init"
         self.message = "正在获取二维码…"
+        self.tone = ""
         self.qr_content: Optional[str] = None
         self.qr_image: Optional[str] = None
+        self.qr_generated_at = 0
+        self.qr_index = 0
         self.verify_code: Optional[str] = None
+
+    @property
+    def done(self) -> bool:
+        return not self.is_alive() and self.status != "init"
+
+    @property
+    def window_ends_at(self) -> int:
+        return self.started_at + LOGIN_WINDOW
+
+    def _set(self, status: str, message: str, tone: str = "") -> None:
+        self.status, self.message, self.tone = status, message, tone
+
+    def _new_qrcode(self, client: ILinkClient) -> str:
+        qr = client.get_qrcode()
+        self.qr_content = qr["content"]
+        self.qr_image = _qr_data_url(qr["content"])
+        self.qr_generated_at = _now()
+        self.qr_index += 1
+        self.verify_code = None
+        self._set("wait", *self.STATUS_TEXT["wait"])
+        return qr["qrcode"]
 
     def run(self) -> None:
         client = ILinkClient()
         try:
-            qr = client.get_qrcode()
-            self.qr_content = qr["content"]
-            self.qr_image = _qr_data_url(qr["content"])
-            self.status, self.message = "wait", "请用要接入的微信扫码"
+            ticket = self._new_qrcode(client)
             base_url = None
-            while not self.stop_event.is_set() and _now() - self.started_at < LOGIN_TTL:
-                data = client.get_qrcode_status(qr["qrcode"], base_url=base_url,
-                                                verify_code=self.verify_code)
-                status = data.get("status") or "wait"
-                self.status = status
-                if status == "scaned":
-                    self.message = "已扫码，请在手机上确认"
-                elif status == "need_verifycode":
-                    self.message = "请在插件配置的「配对数字」里填写手机上显示的数字并保存"
-                    self.stop_event.wait(3)
-                elif status == "verify_code_blocked":
-                    self.message = "配对数字多次错误，已停止，请稍后重新添加"
+            while not self.stop_event.is_set():
+                if _now() >= self.window_ends_at:
+                    self._set("timeout", "扫码窗口已结束，请重新添加", "err")
                     return
+                data = client.get_qrcode_status(ticket, base_url=base_url, verify_code=self.verify_code)
+                if self.stop_event.is_set():
+                    return
+                status = data.get("status") or "wait"
+                if status == "expired" or (status == "wait" and _now() - self.qr_generated_at >= QR_TTL + 30):
+                    # 服务端判过期（或本地估算早已过期）就换一张新的，详情页和分享页会自动显示新码。
+                    ticket = self._new_qrcode(client)
+                    base_url = None
+                    continue
+                if status in self.STATUS_TEXT:
+                    self._set(status, *self.STATUS_TEXT[status])
+                    if status == "need_verifycode":
+                        self.stop_event.wait(3)
                 elif status == "scaned_but_redirect":
                     if data.get("redirect_host"):
                         base_url = f"https://{data['redirect_host']}"
-                elif status == "binded_redirect":
-                    self.message = "该微信已被其他客户端绑定（例如内置 ClawBot 渠道），请先在那边退出登录"
+                elif status == "verify_code_blocked":
+                    self._set(status, "配对数字多次错误，已停止，请稍后重新添加", "err")
                     return
-                elif status == "expired":
-                    self.message = "二维码已过期，请重新添加"
+                elif status == "binded_redirect":
+                    self._set(status, "该微信已被其他客户端绑定（例如内置 ClawBot 渠道），请先在那边退出登录", "err")
                     return
                 elif status == "confirmed":
-                    self.plugin.on_login_confirmed(self.relogin_id, data)
-                    self.message = "已连接"
+                    name = self.plugin.on_login_confirmed(self.relogin_id, data)
+                    self._set(status, f"已连接：{name}", "ok")
                     return
-            if not self.stop_event.is_set():
-                self.status, self.message = "expired", "等待超时，请重新添加"
         except Exception as err:
-            self.status, self.message = "error", f"登录失败：{err}"
+            self._set("error", f"登录失败：{err}", "err")
             logger.error(f"[ClawBotBridge] 扫码登录失败：{err}")
         finally:
             client.close()
+
+    def snapshot(self) -> Dict[str, Any]:
+        """分享页轮询用的状态；不含任何凭据。"""
+        return {
+            "status": self.status,
+            "message": self.message,
+            "tone": self.tone,
+            "done": self.done,
+            "qr_image": None if self.done else self.qr_image,
+            "qr_index": self.qr_index,
+            "qr_expires_at": self.qr_generated_at + QR_TTL,
+            "window_ends_at": self.window_ends_at,
+        }
 
 
 class ClawBotBridge(_PluginBase):
@@ -236,7 +284,7 @@ class ClawBotBridge(_PluginBase):
     plugin_name = "微信ClawBot多账号"
     plugin_desc = "多个微信号接入 MoviePilot 智能助手：扫码即绑定，按用户权限对话，回复分段陆续发出。"
     plugin_icon = "https://raw.githubusercontent.com/yejialiango/MoviePilot-Plugins/main/icons/Wechat_A.png"
-    plugin_version = "0.1.2"
+    plugin_version = "0.1.3"
     plugin_label = "消息通知"
     plugin_author = "yejialiango"
     author_url = "https://github.com/yejialiango"
@@ -249,7 +297,6 @@ class ClawBotBridge(_PluginBase):
         self._enabled = False
         self._max_bubbles = 8
         self._min_chars = 60
-        self._show_progress = False
         self._accounts: Dict[str, Dict[str, Any]] = {}
         self._workers: Dict[str, AccountWorker] = {}
         self._login: Optional[LoginSession] = None
@@ -263,7 +310,6 @@ class ClawBotBridge(_PluginBase):
         self._enabled = bool(config.get("enabled"))
         self._max_bubbles = min(9, max(2, int(config.get("max_bubbles") or 8)))
         self._min_chars = max(0, int(config.get("min_chars") or 60))
-        self._show_progress = bool(config.get("show_progress", False))
         with self._lock:
             self._accounts = {a["id"]: a for a in (self.get_data("accounts") or [])}
             for acc_id, acc in self._accounts.items():
@@ -343,7 +389,7 @@ class ClawBotBridge(_PluginBase):
                 peer["context_token"] = context_token
             self._persist()
 
-    def on_login_confirmed(self, relogin_id: Optional[str], data: Dict[str, Any]) -> None:
+    def on_login_confirmed(self, relogin_id: Optional[str], data: Dict[str, Any]) -> str:
         owner = data.get("ilink_user_id") or ""
         fields = {
             "bot_token": data.get("bot_token"),
@@ -370,8 +416,10 @@ class ClawBotBridge(_PluginBase):
                     **fields,
                 }
             self._persist()
-        logger.info(f"[ClawBotBridge] 账号 {self._accounts[acc_id]['name']} 扫码登录成功")
+        name = self._accounts[acc_id]["name"]
+        logger.info(f"[ClawBotBridge] 账号 {name} 扫码登录成功")
         self._reconcile_workers()
+        return name
 
     @staticmethod
     def _guess_mp_user(owner_userid: str) -> str:
@@ -439,17 +487,12 @@ class ClawBotBridge(_PluginBase):
 
             seg = Segmenter(send, budget=self._max_bubbles, min_chars=self._min_chars)
 
-            def on_summary(line: str) -> None:
-                if self._show_progress:
-                    seg.progress(f"⏳ {line.strip('（）')}")
+            # 工具进度不单独发气泡：回复期间已有「正在输入」，进度消息既是噪音又占额度。
+            # 正文里夹带的「（执行了 N 次搜索）」摘要行同样丢弃。
+            lines = LineFilter(seg.feed, lambda _line: None)
 
-            lines = LineFilter(seg.feed, on_summary)
-
-            def on_tool(event: Dict[str, Any]) -> None:
-                if self._show_progress and event.get("status") == "running":
-                    # 宿主的工具提示形如「调用 MoviePilot API：x，主要参数：{...}」，参数对用户是噪音。
-                    text = str(event.get("message") or event.get("tool_name") or "处理中")
-                    seg.progress(f"⏳ {PARAMS_SUFFIX.sub('', text).strip()}")
+            def on_tool(_event: Dict[str, Any]) -> None:
+                pass
 
             def on_message(message: Any) -> None:
                 body = "\n".join(x for x in (getattr(message, "title", None),
@@ -530,6 +573,11 @@ class ClawBotBridge(_PluginBase):
              "auth": "bear", "summary": "删除账号"},
             {"path": "/refresh", "endpoint": self.api_refresh, "methods": ["GET"],
              "auth": "bear", "summary": "刷新详情页"},
+            # 分享页给被邀请人打开，不能要求登录 MoviePilot；只认当前扫码会话的一次性 token。
+            {"path": "/share", "endpoint": self.api_share, "methods": ["GET"],
+             "allow_anonymous": True, "summary": "扫码分享页"},
+            {"path": "/share_status", "endpoint": self.api_share_status, "methods": ["GET"],
+             "allow_anonymous": True, "summary": "扫码分享页状态"},
         ]
 
     @staticmethod
@@ -544,10 +592,30 @@ class ClawBotBridge(_PluginBase):
         self._login.start()
         # 等二维码取回来，页面刷新时就能直接显示。
         for _ in range(20):
-            if self._login.qr_content or self._login.status == "error":
+            if self._login.qr_image or self._login.status == "error":
                 break
             time.sleep(0.25)
         return _resp(self._login.status != "error", self._login.message)
+
+    def _login_by_token(self, token: str) -> Optional[LoginSession]:
+        login = self._login
+        if login and token and secrets.compare_digest(token, login.token):
+            return login
+        return None
+
+    def api_share(self, t: str = "") -> HTMLResponse:
+        login = self._login_by_token(t)
+        if not login or (login.done and login.status != "confirmed"):
+            return HTMLResponse(INVALID_HTML, status_code=404)
+        title = "重新登录已有账号" if login.relogin_id else "新增一个微信账号"
+        return HTMLResponse(render_share_page(title), headers={"Cache-Control": "no-store"})
+
+    def api_share_status(self, t: str = "") -> JSONResponse:
+        login = self._login_by_token(t)
+        if not login:
+            return JSONResponse({"status": "invalid", "message": "链接已失效", "tone": "err", "done": True},
+                                status_code=404)
+        return JSONResponse(login.snapshot(), headers={"Cache-Control": "no-store"})
 
     def api_login_cancel(self) -> Dict[str, Any]:
         if self._login:
@@ -574,15 +642,12 @@ class ClawBotBridge(_PluginBase):
         users = [{"title": u.name + ("（管理员）" if u.is_superuser else ""), "value": u.name}
                  for u in (UserOper().list() or []) if u.is_active]
         switch_items = [{"title": t.value, "value": t.value} for t in SWITCH_ITEMS]
-        model: Dict[str, Any] = {"enabled": False, "max_bubbles": 8, "min_chars": 60,
-                                 "show_progress": False, "verify_code": ""}
+        model: Dict[str, Any] = {"enabled": False, "max_bubbles": 8, "min_chars": 60, "verify_code": ""}
         rows: List[dict] = [
             {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                     {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}}]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                    {"component": "VSwitch", "props": {"model": "show_progress", "label": "发送工具进度"}}]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                     {"component": "VTextField", "props": {"model": "verify_code", "label": "配对数字",
                                                           "hint": "扫码时手机要求输入数字才需要填", "persistent-hint": True}}]},
             ]},
@@ -625,58 +690,106 @@ class ClawBotBridge(_PluginBase):
             ]})
         return [{"component": "VForm", "content": rows}], model
 
+    @staticmethod
+    def _share_url(token: str) -> str:
+        path = f"/api/v1/plugin/ClawBotBridge/share?t={token}"
+        domain = str(get_runtime_setting("APP_DOMAIN", "") or "").strip().rstrip("/")
+        return f"{domain}{path}" if domain else path
+
+    @staticmethod
+    def _btn(text: str, api: str, params: Optional[dict] = None, **props: Any) -> dict:
+        return {"component": "VBtn", "text": text, "props": {"class": "mr-2 mb-2", **props},
+                "events": {"click": {"api": f"plugin/ClawBotBridge/{api}", "method": "get",
+                                     "params": params or {}}}}
+
+    def _login_card(self, login: LoginSession) -> dict:
+        tone_color = {"ok": "success", "warn": "warning", "err": "error"}.get(login.tone, "info")
+        if login.relogin_id:
+            acc = self.get_account(login.relogin_id) or {}
+            title = f"重新扫码：{acc.get('name') or login.relogin_id}"
+        else:
+            title = "扫码添加微信"
+        if login.status == "confirmed":
+            visual = {"component": "div", "props": {"class": "text-h2 text-center py-6"}, "text": "✅"}
+        elif login.qr_image and not login.done:
+            visual = {"component": "VImg", "props": {"src": login.qr_image, "width": 240, "height": 240,
+                                                     "class": "mx-auto bg-white rounded"}}
+        else:
+            visual = {"component": "div", "props": {"class": "text-center py-6 text-medium-emphasis"},
+                      "text": "暂无二维码"}
+        info: List[dict] = [
+            {"component": "VChip", "text": login.message,
+             "props": {"color": tone_color, "variant": "tonal", "class": "mb-3"}},
+        ]
+        if not login.done:
+            clock = datetime.fromtimestamp
+            info += [
+                {"component": "div", "props": {"class": "text-body-2 mb-1"},
+                 "text": f"第 {login.qr_index} 张二维码，{clock(login.qr_generated_at).strftime('%H:%M:%S')} 生成，"
+                         f"约 4 分钟有效，过期会自动换新"},
+                {"component": "div", "props": {"class": "text-body-2 mb-3"},
+                 "text": f"扫码窗口到 {clock(login.window_ends_at).strftime('%H:%M')} 结束"},
+                {"component": "div", "props": {"class": "text-body-2 font-weight-medium"},
+                 "text": "发给别人扫：把下面的链接发给对方，在电脑或另一台手机上打开，页面会一直显示最新的二维码"},
+                {"component": "div", "props": {"class": "text-caption text-medium-emphasis mb-2",
+                                               "style": "word-break: break-all"},
+                 "text": self._share_url(login.token)},
+                {"component": "VBtn", "text": "打开分享页",
+                 "props": {"href": self._share_url(login.token), "target": "_blank", "variant": "tonal",
+                           "size": "small", "class": "mb-3", "prepend-icon": "mdi-open-in-new"}},
+            ]
+        actions = [self._btn("刷新状态", "refresh", color="primary")]
+        actions.append(self._btn("关闭" if login.done else "取消扫码", "login/cancel", variant="tonal"))
+        return {"component": "VCard", "props": {"variant": "outlined", "class": "mb-4"}, "content": [
+            {"component": "VCardItem", "content": [{"component": "VCardTitle", "text": title}]},
+            {"component": "VCardText", "content": [{"component": "VRow", "content": [
+                {"component": "VCol", "props": {"cols": 12, "md": 5}, "content": [visual]},
+                {"component": "VCol", "props": {"cols": 12, "md": 7}, "content": info},
+            ]}, {"component": "div", "content": actions}]},
+        ]}
+
     def get_page(self) -> List[dict]:
-        refresh = {"component": "VBtn", "text": "刷新", "props": {"variant": "tonal", "class": "mr-2"},
-                   "events": {"click": {"api": "plugin/ClawBotBridge/refresh", "method": "get", "params": {}}}}
         page: List[dict] = []
         login = self._login
-        if login and (login.is_alive() or login.status in ("confirmed", "error", "expired")):
-            content: List[dict] = [{"component": "div", "props": {"class": "text-h6 mb-2"},
-                                    "text": f"扫码状态：{login.message}"}]
-            if login.qr_image and login.is_alive():
-                content.append({"component": "VImg", "props": {"src": login.qr_image, "max-width": 260,
-                                                               "class": "my-2"}})
-            elif login.qr_content and login.is_alive():
-                content.append({"component": "div", "text": f"二维码内容：{login.qr_content}"})
-            content.append({"component": "div", "content": [
-                {"component": "VBtn", "text": "刷新状态", "props": {"color": "primary", "class": "mr-2"},
-                 "events": {"click": {"api": "plugin/ClawBotBridge/refresh", "method": "get", "params": {}}}},
-                {"component": "VBtn", "text": "关闭", "props": {"variant": "tonal"},
-                 "events": {"click": {"api": "plugin/ClawBotBridge/login/cancel", "method": "get", "params": {}}}},
-            ]})
-            page.append({"component": "VCard", "props": {"variant": "outlined", "class": "mb-4 pa-4"},
-                         "content": content})
+        if login and login.status != "init":
+            page.append(self._login_card(login))
         with self._lock:
             accounts = [dict(a) for a in self._accounts.values()]
             alive = {k for k, w in self._workers.items() if w.is_alive()}
-        status_text = {"online": "在线", "expired": "登录失效"}
         for acc in accounts:
-            state = "接收中" if acc["id"] in alive else status_text.get(acc.get("status"), "未运行")
+            if acc["id"] in alive:
+                state, color = "接收中", "success"
+            elif acc.get("status") == "expired":
+                state, color = "登录失效，请重新扫码", "error"
+            else:
+                state, color = "未运行", "grey"
             owner = acc.get("owner_userid")
             peer = (acc.get("peers") or {}).get(owner) or {}
-            page.append({"component": "VCard", "props": {"variant": "outlined", "class": "mb-3 pa-3"}, "content": [
-                {"component": "div", "props": {"class": "text-subtitle-1"},
-                 "text": f"{acc.get('name')} · {state} · 绑定用户：{acc.get('mp_username') or '未绑定'}"},
-                {"component": "div", "props": {"class": "text-caption"},
-                 "text": f"微信 userid：{owner or '—'} · 最近互动：{_fmt_ts(peer.get('last_active'))}"
-                         f" · 登录时间：{_fmt_ts(acc.get('logged_in_at'))}"},
-                {"component": "div", "props": {"class": "mt-2"}, "content": [
-                    {"component": "VBtn", "text": "重新扫码", "props": {"size": "small", "variant": "tonal",
-                                                    "class": "mr-2"},
-                     "events": {"click": {"api": "plugin/ClawBotBridge/login/start", "method": "get",
-                                          "params": {"account_id": acc["id"]}}}},
-                    {"component": "VBtn", "text": "删除", "props": {"size": "small", "color": "error",
-                                                    "variant": "tonal"},
-                     "events": {"click": {"api": "plugin/ClawBotBridge/account/remove", "method": "get",
-                                          "params": {"account_id": acc["id"]}}}},
+            page.append({"component": "VCard", "props": {"variant": "outlined", "class": "mb-3"}, "content": [
+                {"component": "VCardItem", "content": [
+                    {"component": "VCardTitle", "text": acc.get("name")},
+                    {"component": "VCardSubtitle",
+                     "text": f"绑定用户：{acc.get('mp_username') or '未绑定（到插件配置里选择）'}"},
+                ]},
+                {"component": "VCardText", "content": [
+                    {"component": "VChip", "text": state,
+                     "props": {"color": color, "variant": "tonal", "size": "small", "class": "mb-2"}},
+                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis"},
+                     "text": f"最近互动 {_fmt_ts(peer.get('last_active'))} · 登录于 {_fmt_ts(acc.get('logged_in_at'))}"
+                             f" · {owner or '—'}"},
+                    {"component": "div", "props": {"class": "mt-2"}, "content": [
+                        self._btn("重新扫码", "login/start", {"account_id": acc["id"]}, size="small",
+                                  variant="tonal"),
+                        self._btn("删除", "account/remove", {"account_id": acc["id"]}, size="small",
+                                  variant="tonal", color="error"),
+                    ]},
                 ]},
             ]})
         if not accounts and not page:
             page.append({"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-3",
                                                           "text": "还没有接入微信，点下面的「添加微信」扫码。"}})
         page.append({"component": "div", "content": [
-            {"component": "VBtn", "text": "添加微信", "props": {"color": "primary", "class": "mr-2"},
-             "events": {"click": {"api": "plugin/ClawBotBridge/login/start", "method": "get", "params": {}}}},
-            refresh,
+            self._btn("添加微信", "login/start", color="primary", **{"prepend-icon": "mdi-qrcode"}),
+            self._btn("刷新", "refresh", variant="tonal"),
         ]})
         return page
