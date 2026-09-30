@@ -32,6 +32,8 @@ CLIENT_VERSION = (2 << 16) | (4 << 8) | 9
 BOT_AGENT = "MoviePilot-ClawBotBridge/1.0"
 
 STALE_TOKEN_ERRCODE = -14
+TYPING_ON = 1
+TYPING_OFF = 2
 
 ITEM_TEXT = 1
 ITEM_VOICE = 3
@@ -200,6 +202,18 @@ class ILinkClient:
             create_time_ms=int(msg.get("create_time_ms") or 0),
             raw=msg,
         )
+
+    def get_typing_ticket(self, user_id: str, context_token: Optional[str]) -> Optional[str]:
+        """取「正在输入」所需的 typing_ticket（按用户下发）。"""
+        data = self._check("getconfig", self._post(
+            "ilink/bot/getconfig", {"ilink_user_id": user_id, "context_token": context_token}))
+        return data.get("typing_ticket") or None
+
+    def send_typing(self, user_id: str, ticket: str, on: bool = True) -> None:
+        """显示/取消「正在输入」。客户端几秒后自动消失，需要持续续发（官方插件每 5 秒一次）。"""
+        self._check("sendtyping", self._post("ilink/bot/sendtyping", {
+            "ilink_user_id": user_id, "typing_ticket": ticket,
+            "status": TYPING_ON if on else TYPING_OFF}, timeout=10))
 
     def send_text(self, to_user_id: str, text: str, context_token: Optional[str],
                   run_id: Optional[str] = None) -> str:

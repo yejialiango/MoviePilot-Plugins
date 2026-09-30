@@ -25,13 +25,18 @@ _BOLD = re.compile(r"\*\*(.+?)\*\*|__(.+?)__")
 _LINK = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
 
 
+def tidy(text: str) -> str:
+    """微信 ClawBot 能渲染 Markdown（表格、行内代码），只做空白整理，不改写内容。"""
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
 def is_summary_line(line: str) -> bool:
     """判断是否为 Agent 在正文里插入的工具进度摘要行。"""
     return bool(_SUMMARY_LINE.match(line))
 
 
 def to_plain(text: str) -> str:
-    """把常见 Markdown 收敛成微信里能直接读的纯文本。"""
+    """把常见 Markdown 收敛成纯文本（目前未使用，保留给不渲染 Markdown 的场景）。"""
     lines = []
     for line in text.splitlines():
         if _CODE_FENCE.match(line):
@@ -161,14 +166,14 @@ class Segmenter:
                 head = self._pending[:nxt]
                 cut = nxt
             self._pending = self._pending[cut + 2:]
-            plain = to_plain(head)
+            plain = tidy(head)
             if plain:
                 for part in split_long(plain, self._max_chars, self.remaining - 1):
                     self._emit(part)
 
     def finish(self, fallback: Optional[str] = None) -> None:
         """发出剩余内容；整轮没有任何正文时发送 ``fallback``。"""
-        tail = to_plain(self._pending)
+        tail = tidy(self._pending)
         self._pending = ""
         if not tail and not self._any_text and fallback:
             tail = fallback.strip()

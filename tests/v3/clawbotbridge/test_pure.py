@@ -164,3 +164,11 @@ def test_check_raises_with_code():
         assert err.code == -14
     else:
         raise AssertionError("expected ILinkError")
+
+
+def test_segmenter_keeps_markdown_tables():
+    seg, sent, _ = _segmenter(min_chars=1)
+    table = "| 时间 | 片名 |\n|---|---|\n| 09-29 | **小妇人** |"
+    seg.feed(f"结果如下：\n\n{table}\n\n")
+    seg.finish()
+    assert sent == ["结果如下：", table]

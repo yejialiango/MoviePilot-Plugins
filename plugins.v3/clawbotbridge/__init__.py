@@ -18,6 +18,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import re
 import threading
 import time
 import uuid
@@ -32,7 +33,7 @@ from app.sdk.events import Event, eventmanager
 from app.sdk.logging import logger
 
 from .ilink import STALE_TOKEN_ERRCODE, ILinkClient, ILinkError, InboundMessage
-from .segmenter import LineFilter, Segmenter, to_plain
+from .segmenter import LineFilter, Segmenter, tidy
 
 # 默认推送的通知类型（MessageType 的中文值）。
 DEFAULT_SWITCHES = [MessageType.Download.value, MessageType.Organize.value,
@@ -43,6 +44,8 @@ SWITCH_ITEMS = [MessageType.Download, MessageType.Organize, MessageType.Subscrib
 NEW_SESSION_COMMANDS = {"/new", "/新对话", "新对话"}
 STOP_COMMANDS = {"/stop", "/停止"}
 LOGIN_TTL = 300
+PARAMS_SUFFIX = re.compile(r"[，,]\s*主要参数[:：].*$", re.S)
+TYPING_INTERVAL = 5.0
 
 
 def _now() -> int:
@@ -68,6 +71,47 @@ def _qr_data_url(content: str) -> Optional[str]:
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+class TypingKeeper:
+    """回复期间持续显示「正在输入」：客户端几秒后自动消失，按官方插件的做法每 5 秒续发。"""
+
+    def __init__(self, client: ILinkClient, user_id: str, context_token: Optional[str]) -> None:
+        self._client = client
+        self._user_id = user_id
+        self._context_token = context_token
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._ticket: Optional[str] = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, name="clawbotbridge-typing", daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        try:
+            self._ticket = self._client.get_typing_ticket(self._user_id, self._context_token)
+        except ILinkError as err:
+            logger.debug(f"[ClawBotBridge] 获取 typing_ticket 失败：{err}")
+            return
+        if not self._ticket:
+            return
+        while not self._stop.is_set():
+            try:
+                self._client.send_typing(self._user_id, self._ticket, on=True)
+            except ILinkError as err:
+                logger.debug(f"[ClawBotBridge] 发送正在输入失败：{err}")
+            self._stop.wait(TYPING_INTERVAL)
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=2)
+        if self._ticket:
+            try:
+                self._client.send_typing(self._user_id, self._ticket, on=False)
+            except ILinkError:
+                pass
 
 
 class AccountWorker(threading.Thread):
@@ -192,7 +236,7 @@ class ClawBotBridge(_PluginBase):
     plugin_name = "微信ClawBot多账号"
     plugin_desc = "多个微信号接入 MoviePilot 智能助手：扫码即绑定，按用户权限对话，回复分段陆续发出。"
     plugin_icon = "https://raw.githubusercontent.com/yejialiango/MoviePilot-Plugins/main/icons/Wechat_A.png"
-    plugin_version = "0.1.1"
+    plugin_version = "0.1.2"
     plugin_label = "消息通知"
     plugin_author = "yejialiango"
     author_url = "https://github.com/yejialiango"
@@ -205,7 +249,7 @@ class ClawBotBridge(_PluginBase):
         self._enabled = False
         self._max_bubbles = 8
         self._min_chars = 60
-        self._show_progress = True
+        self._show_progress = False
         self._accounts: Dict[str, Dict[str, Any]] = {}
         self._workers: Dict[str, AccountWorker] = {}
         self._login: Optional[LoginSession] = None
@@ -219,7 +263,7 @@ class ClawBotBridge(_PluginBase):
         self._enabled = bool(config.get("enabled"))
         self._max_bubbles = min(9, max(2, int(config.get("max_bubbles") or 8)))
         self._min_chars = max(0, int(config.get("min_chars") or 60))
-        self._show_progress = config.get("show_progress", True)
+        self._show_progress = bool(config.get("show_progress", False))
         with self._lock:
             self._accounts = {a["id"]: a for a in (self.get_data("accounts") or [])}
             for acc_id, acc in self._accounts.items():
@@ -403,7 +447,9 @@ class ClawBotBridge(_PluginBase):
 
             def on_tool(event: Dict[str, Any]) -> None:
                 if self._show_progress and event.get("status") == "running":
-                    seg.progress(f"⏳ {event.get('message') or event.get('tool_name') or '处理中'}")
+                    # 宿主的工具提示形如「调用 MoviePilot API：x，主要参数：{...}」，参数对用户是噪音。
+                    text = str(event.get("message") or event.get("tool_name") or "处理中")
+                    seg.progress(f"⏳ {PARAMS_SUFFIX.sub('', text).strip()}")
 
             def on_message(message: Any) -> None:
                 body = "\n".join(x for x in (getattr(message, "title", None),
@@ -411,6 +457,8 @@ class ClawBotBridge(_PluginBase):
                 if body:
                     lines.feed(f"\n\n{body}\n\n")
 
+            typing = TypingKeeper(client, inbound.from_user_id, inbound.context_token)
+            typing.start()
             try:
                 notice = agent_bridge.run_turn(username, session_id, inbound.text,
                                                on_text=lines.feed, on_tool=on_tool,
@@ -423,6 +471,8 @@ class ClawBotBridge(_PluginBase):
                 seg.finish(fallback=f"⚠️ {err}")
                 if seg.sent == 0:
                     send(f"⚠️ {err}")
+            finally:
+                typing.stop()
         finally:
             client.close()
 
@@ -439,7 +489,7 @@ class ClawBotBridge(_PluginBase):
         if data.get("channel") or type_value == MessageType.Agent.value:
             return
         title, text, link = data.get("title") or "", data.get("text") or "", data.get("link") or ""
-        body = to_plain("\n".join(x for x in (title, text) if x))
+        body = tidy("\n".join(x for x in (title, text) if x))
         if link:
             body = f"{body}\n{link}"
         if not body:
@@ -525,7 +575,7 @@ class ClawBotBridge(_PluginBase):
                  for u in (UserOper().list() or []) if u.is_active]
         switch_items = [{"title": t.value, "value": t.value} for t in SWITCH_ITEMS]
         model: Dict[str, Any] = {"enabled": False, "max_bubbles": 8, "min_chars": 60,
-                                 "show_progress": True, "verify_code": ""}
+                                 "show_progress": False, "verify_code": ""}
         rows: List[dict] = [
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
