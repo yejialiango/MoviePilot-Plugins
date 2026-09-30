@@ -53,6 +53,11 @@ def _fmt_ts(ts: Optional[int]) -> str:
     return datetime.fromtimestamp(ts).strftime("%m-%d %H:%M") if ts else "—"
 
 
+def _resp(success: bool, message: str = "") -> Dict[str, Any]:
+    """前端只接受恰好含 success/message/data 三个键的响应信封，缺键会报「服务器返回了无效响应」。"""
+    return {"success": success, "message": message, "data": None}
+
+
 def _qr_data_url(content: str) -> Optional[str]:
     """把二维码内容渲染成 PNG data URL；缺少 qrcode 库时返回 None。"""
     try:
@@ -187,7 +192,7 @@ class ClawBotBridge(_PluginBase):
     plugin_name = "微信ClawBot多账号"
     plugin_desc = "多个微信号接入 MoviePilot 智能助手：扫码即绑定，按用户权限对话，回复分段陆续发出。"
     plugin_icon = "https://raw.githubusercontent.com/yejialiango/MoviePilot-Plugins/main/icons/Wechat_A.png"
-    plugin_version = "0.1.0"
+    plugin_version = "0.1.1"
     plugin_label = "消息通知"
     plugin_author = "yejialiango"
     author_url = "https://github.com/yejialiango"
@@ -480,7 +485,7 @@ class ClawBotBridge(_PluginBase):
     @staticmethod
     def api_refresh() -> Dict[str, Any]:
         # 页面按钮触发后宿主会重新拉取 get_page，这里无需做事。
-        return {"success": True}
+        return _resp(True)
 
     def api_login_start(self, account_id: str = "") -> Dict[str, Any]:
         if self._login and self._login.is_alive():
@@ -492,13 +497,13 @@ class ClawBotBridge(_PluginBase):
             if self._login.qr_content or self._login.status == "error":
                 break
             time.sleep(0.25)
-        return {"success": self._login.status != "error", "message": self._login.message}
+        return _resp(self._login.status != "error", self._login.message)
 
     def api_login_cancel(self) -> Dict[str, Any]:
         if self._login:
             self._login.stop_event.set()
             self._login = None
-        return {"success": True}
+        return _resp(True)
 
     def api_account_remove(self, account_id: str = "") -> Dict[str, Any]:
         with self._lock:
@@ -507,7 +512,7 @@ class ClawBotBridge(_PluginBase):
             self._persist()
         if worker:
             worker.stop()
-        return {"success": bool(acc), "message": "已删除" if acc else "账号不存在"}
+        return _resp(bool(acc), "已删除" if acc else "账号不存在")
 
     # ---------------- 页面 ----------------
 
@@ -571,7 +576,7 @@ class ClawBotBridge(_PluginBase):
         return [{"component": "VForm", "content": rows}], model
 
     def get_page(self) -> List[dict]:
-        refresh = {"component": "VBtn", "props": {"text": "刷新", "variant": "tonal", "class": "mr-2"},
+        refresh = {"component": "VBtn", "text": "刷新", "props": {"variant": "tonal", "class": "mr-2"},
                    "events": {"click": {"api": "plugin/ClawBotBridge/refresh", "method": "get", "params": {}}}}
         page: List[dict] = []
         login = self._login
@@ -584,9 +589,9 @@ class ClawBotBridge(_PluginBase):
             elif login.qr_content and login.is_alive():
                 content.append({"component": "div", "text": f"二维码内容：{login.qr_content}"})
             content.append({"component": "div", "content": [
-                {"component": "VBtn", "props": {"text": "刷新状态", "color": "primary", "class": "mr-2"},
+                {"component": "VBtn", "text": "刷新状态", "props": {"color": "primary", "class": "mr-2"},
                  "events": {"click": {"api": "plugin/ClawBotBridge/refresh", "method": "get", "params": {}}}},
-                {"component": "VBtn", "props": {"text": "关闭", "variant": "tonal"},
+                {"component": "VBtn", "text": "关闭", "props": {"variant": "tonal"},
                  "events": {"click": {"api": "plugin/ClawBotBridge/login/cancel", "method": "get", "params": {}}}},
             ]})
             page.append({"component": "VCard", "props": {"variant": "outlined", "class": "mb-4 pa-4"},
@@ -606,11 +611,11 @@ class ClawBotBridge(_PluginBase):
                  "text": f"微信 userid：{owner or '—'} · 最近互动：{_fmt_ts(peer.get('last_active'))}"
                          f" · 登录时间：{_fmt_ts(acc.get('logged_in_at'))}"},
                 {"component": "div", "props": {"class": "mt-2"}, "content": [
-                    {"component": "VBtn", "props": {"text": "重新扫码", "size": "small", "variant": "tonal",
+                    {"component": "VBtn", "text": "重新扫码", "props": {"size": "small", "variant": "tonal",
                                                     "class": "mr-2"},
                      "events": {"click": {"api": "plugin/ClawBotBridge/login/start", "method": "get",
                                           "params": {"account_id": acc["id"]}}}},
-                    {"component": "VBtn", "props": {"text": "删除", "size": "small", "color": "error",
+                    {"component": "VBtn", "text": "删除", "props": {"size": "small", "color": "error",
                                                     "variant": "tonal"},
                      "events": {"click": {"api": "plugin/ClawBotBridge/account/remove", "method": "get",
                                           "params": {"account_id": acc["id"]}}}},
@@ -620,7 +625,7 @@ class ClawBotBridge(_PluginBase):
             page.append({"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-3",
                                                           "text": "还没有接入微信，点下面的「添加微信」扫码。"}})
         page.append({"component": "div", "content": [
-            {"component": "VBtn", "props": {"text": "添加微信", "color": "primary", "class": "mr-2"},
+            {"component": "VBtn", "text": "添加微信", "props": {"color": "primary", "class": "mr-2"},
              "events": {"click": {"api": "plugin/ClawBotBridge/login/start", "method": "get", "params": {}}}},
             refresh,
         ]})

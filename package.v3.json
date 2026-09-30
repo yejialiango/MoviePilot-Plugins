@@ -619,13 +619,14 @@
     "name": "微信ClawBot多账号",
     "description": "多个微信号接入 MoviePilot 智能助手：扫码即绑定，按用户权限对话，回复分段陆续发出。",
     "labels": "消息通知",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "icon": "https://raw.githubusercontent.com/yejialiango/MoviePilot-Plugins/main/icons/Wechat_A.png",
     "author": "yejialiango",
     "level": 1,
     "release": true,
     "system_version": ">=3.0.10",
     "history": {
+      "v0.1.1": "修复详情页按钮无文字、点击后提示「服务器返回了无效响应」。",
       "v0.1.0": "首个版本：多账号扫码接入、按绑定用户身份运行智能助手、回复按段落分条发送、通知推送。"
     }
   }
