@@ -136,7 +136,8 @@ class AccountWorker(threading.Thread):
         account = self.plugin.get_account(self.account_id)
         if not account:
             return
-        client = ILinkClient(account["bot_token"], account.get("base_url"))
+        bot_token = account["bot_token"]
+        client = ILinkClient(bot_token, account.get("base_url"))
         timeout = 40.0
         failures = 0
         logger.info(f"[ClawBotBridge] 账号 {account['name']} 开始接收消息")
@@ -150,6 +151,9 @@ class AccountWorker(threading.Thread):
                     failures = 0
                 except ILinkError as err:
                     if err.code == STALE_TOKEN_ERRCODE:
+                        # 重新扫码后旧 token 会立刻失效；那时账号已换上新 token，不能把新登录标成失效。
+                        if self.stop_event.is_set() or account.get("bot_token") != bot_token:
+                            break
                         logger.warning(f"[ClawBotBridge] 账号 {account['name']} 登录已失效，需要重新扫码")
                         self.plugin.update_account(self.account_id, status="expired")
                         break
@@ -287,7 +291,7 @@ class ClawBotBridge(_PluginBase):
     plugin_name = "微信ClawBot多账号"
     plugin_desc = "多个微信号接入 MoviePilot 智能助手：扫码即绑定，按用户权限对话，回复分段陆续发出。"
     plugin_icon = "https://raw.githubusercontent.com/yejialiango/MoviePilot-Plugins/main/icons/Wechat_A.png"
-    plugin_version = "0.1.4"
+    plugin_version = "0.1.5"
     plugin_label = "消息通知"
     plugin_author = "yejialiango"
     author_url = "https://github.com/yejialiango"
@@ -410,6 +414,10 @@ class ClawBotBridge(_PluginBase):
                     fields["mp_username"] = bind_user
                 self._accounts[relogin_id].update(fields)
                 acc_id = relogin_id
+                # 旧线程还拿着旧 token，停掉后由 _reconcile_workers 用新 token 重起。
+                old_worker = self._workers.pop(relogin_id, None)
+                if old_worker:
+                    old_worker.stop()
             else:
                 acc_id = uuid.uuid4().hex[:8]
                 self._accounts[acc_id] = {
